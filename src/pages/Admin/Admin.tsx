@@ -9,12 +9,14 @@
  * @dependencies react, react-router-dom, useDeals, useAuth, tracker
  * @last_updated 2026-02-27 - 消除 as any 类型断言，增强类型安全
  */
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useDeals } from '../../hooks/useDeals'
 import { useAuth } from '../../hooks/useAuth'
 import { getLocalLogs } from '../../lib/tracker'
 import { useToast } from '../../components/Toast'
+import { supabase } from '../../lib/supabase'
+import { parseDealImage } from '../../lib/dealOcr'
 import type { Deal } from '../../models/deal'
 
 type AdminTab = 'deals' | 'merchants' | 'analytics'
@@ -58,18 +60,56 @@ const EMPTY_FORM: DealFormData = {
 
 export default function Admin() {
     const navigate = useNavigate()
-    const { deals, merchants } = useDeals()
-    const { warning } = useToast()
+    const { deals, merchants, refresh } = useDeals()
+    const { warning, success } = useToast()
     const { user } = useAuth()
     const [activeTab, setActiveTab] = useState<AdminTab>('deals')
     const [showForm, setShowForm] = useState(false)
     const [formData, setFormData] = useState<DealFormData>(EMPTY_FORM)
-    const [localDeals, setLocalDeals] = useState<typeof deals>([])
+    const [isSubmitting, setIsSubmitting] = useState(false)
+    const [isRecognizing, setIsRecognizing] = useState(false)
+    const [uploadPreview, setUploadPreview] = useState<string | null>(null)
 
-    // 合并远程 deals 和本地新增的 deals
-    useEffect(() => {
-        setLocalDeals(deals)
-    }, [deals])
+    /** AI 截图识别处理 */
+    const handleImageUpload = async (file: File) => {
+        if (!file.type.startsWith('image/')) {
+            warning('请上传图片文件')
+            return
+        }
+        // 预览
+        const previewUrl = URL.createObjectURL(file)
+        setUploadPreview(previewUrl)
+        setIsRecognizing(true)
+
+        try {
+            const parsed = await parseDealImage(file)
+
+            // 尝试自动匹配商家
+            const matchedMerchant = merchants.find(m =>
+                parsed.merchantName && m.name.includes(parsed.merchantName)
+            )
+
+            setFormData(prev => ({
+                ...prev,
+                title: parsed.title || prev.title,
+                platform: parsed.platform || prev.platform,
+                discountType: parsed.discountType || prev.discountType,
+                discountValue: parsed.discountValue || prev.discountValue,
+                thresholdAmount: parsed.thresholdAmount || prev.thresholdAmount,
+                price: parsed.price || prev.price,
+                originalPrice: parsed.originalPrice || prev.originalPrice,
+                merchantId: matchedMerchant?.id || prev.merchantId,
+            }))
+
+            const confPct = Math.round((parsed.confidence || 0) * 100)
+            success(`识别完成（置信度 ${confPct}%），请核对后提交`)
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : '识别失败'
+            warning(msg)
+        } finally {
+            setIsRecognizing(false)
+        }
+    }
 
     // 埋点统计数据
     const analytics = useMemo(() => {
@@ -95,52 +135,61 @@ export default function Admin() {
         return { total: logs.length, eventCounts, platformCounts, hourlyData }
     }, [activeTab])
 
-    const handleSubmit = () => {
+    const handleSubmit = async () => {
         if (!formData.title || !formData.merchantId) {
             warning('请填写标题并选择商家')
             return
         }
-        const newDeal = {
-            id: `local-${Date.now()}`,
-            merchantId: formData.merchantId,
-            title: formData.title,
-            platform: formData.platform,
-            scene: formData.scene,
-            discountType: formData.discountType,
-            discountValue: formData.discountValue,
-            thresholdAmount: formData.thresholdAmount,
-            maxDiscount: 0,
-            price: formData.price,
-            originalPrice: formData.originalPrice,
-            stackable: false,
-            stackGroup: null,
-            stackExclusiveType: null,
-            appliesStage: 'BASE',
-            cardRequired: null,
-            membershipRequired: null,
-            conditions: null,
-            validFrom: null,
-            validTo: null,
-            affiliateUrl: null,
-            isActive: formData.isActive,
-            recurrenceType: 'NONE',
-            recurrenceRule: null,
-            notifyOnNew: true,
-            estimatedMinSave: 0,
-            estimatedMaxSave: 0,
-            voucherClaimUrl: null,
-            updatedAt: new Date().toISOString(),
-            createdAt: new Date().toISOString(),
-        } as Deal
-        setLocalDeals(prev => [newDeal, ...prev])
-        setFormData(EMPTY_FORM)
-        setShowForm(false)
+
+        setIsSubmitting(true)
+        try {
+            const newDealData = {
+                merchant_id: formData.merchantId,
+                title: formData.title,
+                platform: formData.platform,
+                scene: formData.scene,
+                discount_type: formData.discountType,
+                discount_value: formData.discountValue,
+                threshold_amount: formData.thresholdAmount || null,
+                price: formData.price || null,
+                original_price: formData.originalPrice || null,
+                is_active: formData.isActive
+            }
+
+            const { error } = await supabase
+                .from('deals')
+                .insert([newDealData])
+
+            if (error) throw error
+
+            success('录入成功')
+            setFormData(EMPTY_FORM)
+            setShowForm(false)
+            await refresh() // 刷新列表
+        } catch (err: any) {
+            console.error('新建优惠失败', err)
+            warning(err.message || '录入失败，请检查网络或权限')
+        } finally {
+            setIsSubmitting(false)
+        }
     }
 
-    const toggleDealActive = (dealId: string) => {
-        setLocalDeals(prev => prev.map(d =>
-            d.id === dealId ? { ...d, isActive: !d.isActive } : d
-        ))
+    const toggleDealActive = async (deal: Deal) => {
+        try {
+            const newStatus = !deal.isActive
+            // 乐观更新体验可加，但此处使用刷新保证强一致性
+            const { error } = await supabase
+                .from('deals')
+                .update({ is_active: newStatus })
+                .eq('id', deal.id)
+
+            if (error) throw error
+
+            success(newStatus ? '已上架' : '已下架')
+            await refresh()
+        } catch (err: any) {
+            warning('状态修改失败: ' + err.message)
+        }
     }
 
     const tabs: { key: AdminTab; icon: string; label: string }[] = [
@@ -195,6 +244,47 @@ export default function Admin() {
                 {showForm && activeTab === 'deals' && (
                     <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-5 animate-in fade-in slide-in-from-top-4 duration-300">
                         <h2 className="font-bold text-sm text-slate-900 dark:text-white mb-4">录入新优惠</h2>
+
+                        {/* === 截图上传区域 === */}
+                        <div className="mb-4">
+                            <label
+                                className={`relative flex flex-col items-center justify-center w-full h-32 border-2 border-dashed rounded-xl cursor-pointer transition-all ${isRecognizing
+                                        ? 'border-[#FF4500] bg-orange-50/50 dark:bg-orange-900/10'
+                                        : 'border-slate-300 dark:border-slate-700 hover:border-[#FF4500]/50 bg-slate-50 dark:bg-slate-800/50'
+                                    }`}
+                            >
+                                <input
+                                    type="file"
+                                    accept="image/*"
+                                    className="hidden"
+                                    onChange={(e) => {
+                                        const file = e.target.files?.[0]
+                                        if (file) handleImageUpload(file)
+                                    }}
+                                />
+                                {isRecognizing ? (
+                                    <div className="flex flex-col items-center gap-2">
+                                        <div className="w-6 h-6 border-2 border-[#FF4500] border-t-transparent rounded-full animate-spin" />
+                                        <span className="text-xs text-[#FF4500] font-bold">AI 正在识别中...</span>
+                                    </div>
+                                ) : uploadPreview ? (
+                                    <div className="flex items-center gap-3">
+                                        <img src={uploadPreview} alt="预览" className="h-20 rounded-lg object-cover" />
+                                        <div className="text-center">
+                                            <span className="material-symbols-outlined text-green-500 text-2xl">check_circle</span>
+                                            <p className="text-[11px] text-slate-400 mt-1">识别完成，点击重新上传</p>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="flex flex-col items-center gap-1.5">
+                                        <span className="material-symbols-outlined text-3xl text-slate-400">photo_camera</span>
+                                        <span className="text-xs font-bold text-slate-500">上传优惠截图，AI 自动识别</span>
+                                        <span className="text-[10px] text-slate-400">支持美团、抖音、银行APP等截图</span>
+                                    </div>
+                                )}
+                            </label>
+                        </div>
+
                         <div className="grid grid-cols-2 gap-3">
                             <div className="col-span-2">
                                 <label className="text-[11px] font-bold text-slate-500 uppercase mb-1 block">优惠标题</label>
@@ -274,9 +364,10 @@ export default function Admin() {
                         </div>
                         <button
                             onClick={handleSubmit}
-                            className="mt-4 w-full py-3 bg-slate-900 dark:bg-white text-white dark:text-slate-900 rounded-xl font-bold text-sm active:scale-[0.98] transition-all"
+                            disabled={isSubmitting}
+                            className={`mt-4 w-full py-3 rounded-xl font-bold text-sm transition-all ${isSubmitting ? 'bg-slate-300 dark:bg-slate-700 text-slate-500 cursor-not-allowed' : 'bg-slate-900 dark:bg-white text-white dark:text-slate-900 active:scale-[0.98]'}`}
                         >
-                            提交并生效
+                            {isSubmitting ? '提交中...' : '提交并生效'}
                         </button>
                     </div>
                 )}
@@ -285,9 +376,9 @@ export default function Admin() {
                 {activeTab === 'deals' && (
                     <div className="space-y-2">
                         <div className="text-xs text-slate-400 font-medium px-1">
-                            共 {localDeals.length} 条优惠 · {localDeals.filter(d => d.isActive).length} 条生效中
+                            共 {deals.length} 条优惠 · {deals.filter(d => d.isActive).length} 条生效中
                         </div>
-                        {localDeals.map(deal => {
+                        {deals.map(deal => {
                             const merchant = merchants.find(m => m.id === deal.merchantId)
                             return (
                                 <div key={deal.id} className={`bg-white dark:bg-slate-900 rounded-xl border p-4 flex items-center gap-3 transition-all ${deal.isActive ? 'border-slate-200 dark:border-slate-800' : 'border-red-200 dark:border-red-900/30 opacity-60'}`}>
@@ -305,7 +396,7 @@ export default function Admin() {
                                         </div>
                                     </div>
                                     <button
-                                        onClick={() => toggleDealActive(deal.id)}
+                                        onClick={() => toggleDealActive(deal)}
                                         className={`shrink-0 px-3 py-1.5 rounded-lg text-[11px] font-bold transition-colors ${deal.isActive
                                             ? 'bg-red-50 text-red-500 dark:bg-red-500/10'
                                             : 'bg-green-50 text-green-600 dark:bg-green-500/10'
@@ -341,7 +432,7 @@ export default function Admin() {
                                     </div>
                                 </div>
                                 <div className="shrink-0 text-right">
-                                    <div className="text-lg font-black text-slate-900 dark:text-white">{localDeals.filter(d => d.merchantId === m.id).length}</div>
+                                    <div className="text-lg font-black text-slate-900 dark:text-white">{deals.filter(d => d.merchantId === m.id).length}</div>
                                     <div className="text-[10px] text-slate-400">在线优惠</div>
                                 </div>
                             </div>

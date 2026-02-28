@@ -10,4 +10,7 @@ export default defineConfig({
   ],
   // SPA 路由回退：所有未匹配请求返回 index.html
   appType: 'spa',
+  server: {
+    port: 5174,
+  },
 })
