@@ -1,56 +1,61 @@
 /**
  * Supabase Edge Function: parse-deal-image
- * 
+ *
  * 【模块】parse-deal-image
- * 【作用】接收优惠活动截图（Base64），调用 OpenAI GPT-4o 进行多模态分析，
+ * 【作用】接收优惠活动截图（Base64），调用 Google Gemini 2.0 Flash 进行多模态分析，
  *        提取商家名、优惠标题、价格、平台等结构化信息并返回 JSON。
  * 【功能】
  *   - 校验输入（Base64 图片 + MIME 类型）
  *   - 构造多模态 Prompt 指导 AI 提取特定字段
  *   - 解析 AI 返回的 JSON 并做字段补全
- * 【依赖】OpenAI API（需在 Supabase 项目的 Secrets 中配置 OPENAI_API_KEY）
- * 【变更日志】2026-03-01 - 初始创建
- * 
+ * 【依赖】Google Gemini API（需在 Supabase Secrets 中配置 GEMINI_API_KEY）
+ * 【变更日志】2026-03-01 - 从 OpenAI GPT-4o 切换为 Gemini 2.0 Flash（免费额度）
+ *
  * 部署方式：
- *   1. 安装 Supabase CLI: npm i -g supabase
- *   2. supabase functions deploy parse-deal-image
- *   3. 在 Supabase Dashboard → Project Settings → Secrets 中添加 OPENAI_API_KEY
+ *   1. 获取 Gemini API Key: https://aistudio.google.com/apikey
+ *   2. 安装 Supabase CLI: npm i -g supabase
+ *   3. supabase login
+ *   4. supabase link --project-ref psfsxrwxfgdprbmcbgpw
+ *   5. supabase secrets set GEMINI_API_KEY=你的Key
+ *   6. supabase functions deploy parse-deal-image
  */
 
 import { serve } from 'https://deno.land/std@0.177.0/http/server.ts'
 
-const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY')
+const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY')
+const GEMINI_MODEL = 'gemini-2.0-flash'
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`
 
-const SYSTEM_PROMPT = `你是一个专业的优惠活动信息提取助手。用户会给你一张优惠活动的截图（来自美团、抖音、银行APP等平台），你需要从中识别并提取以下结构化信息。
+const EXTRACTION_PROMPT = `你是一个专业的优惠活动信息提取助手。请从这张优惠活动截图中识别并提取信息。
 
-请严格按照以下 JSON 格式返回（不要返回任何其他内容）：
+请严格按照以下 JSON 格式返回（不要返回任何其他内容，不要用 markdown 代码块包裹）：
 {
   "merchantName": "商家名称",
   "title": "优惠标题/活动名称",
-  "platform": "来源平台（美团/抖音/招商银行/建设银行/支付宝/小程序 等）",
-  "discountType": "优惠类型（GROUP_BUY=团购套餐, FULL_REDUCE=满减, PERCENTAGE=折扣, VOUCHER=代金券）",
+  "platform": "来源平台（美团/抖音/招商银行/建设银行/工商银行/交通银行/中信银行/支付宝/小程序 等）",
+  "discountType": "优惠类型",
   "discountValue": 0,
   "thresholdAmount": 0,
   "price": 0,
   "originalPrice": 0,
-  "conditions": "使用条件（限时/限量/会员专享等，无则为空字符串）",
+  "conditions": "使用条件",
   "validFrom": "2026-01-01",
   "validTo": "2026-12-31",
   "confidence": 0.9
 }
 
 规则：
-1. discountType 只能是 GROUP_BUY / FULL_REDUCE / PERCENTAGE / VOUCHER 之一
-2. 如果是团购套餐，price 填团购价，originalPrice 填门市价，discountValue 填 0
-3. 如果是满减，thresholdAmount 填满X元，discountValue 填减Y元，price 和 originalPrice 填 0
-4. 如果是折扣，discountValue 填折扣值（如 0.85 代表85折），price 和 originalPrice 填 0
-5. 日期无法识别时，validFrom 填今天，validTo 填3个月后
-6. confidence 根据你对识别结果的把握程度填 0~1 之间的小数
-7. 所有数字字段如果无法识别就填 0
-8. 只返回 JSON，不要返回任何解释文字`
+1. discountType 只能是 GROUP_BUY（团购套餐）/ FULL_REDUCE（满减）/ PERCENTAGE（折扣）/ VOUCHER（代金券）之一
+2. 团购套餐：price=团购价，originalPrice=门市价，discountValue=0
+3. 满减：thresholdAmount=满X元，discountValue=减Y元，price和originalPrice=0
+4. 折扣：discountValue=折扣值（如0.85代表85折），price和originalPrice=0
+5. 日期无法识别时，validFrom填今天，validTo填3个月后
+6. confidence根据识别把握程度填0~1
+7. 无法识别的数字字段填0，文字字段填空字符串
+8. 只返回纯JSON，不要任何额外文字`
 
-serve(async (req) => {
-    // CORS 处理
+serve(async (req: Request) => {
+    // CORS
     if (req.method === 'OPTIONS') {
         return new Response('ok', {
             headers: {
@@ -62,9 +67,9 @@ serve(async (req) => {
     }
 
     try {
-        if (!OPENAI_API_KEY) {
+        if (!GEMINI_API_KEY) {
             return new Response(
-                JSON.stringify({ error: '服务端未配置 OPENAI_API_KEY' }),
+                JSON.stringify({ error: '服务端未配置 GEMINI_API_KEY，请参照部署说明配置' }),
                 { status: 500, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } }
             )
         }
@@ -78,52 +83,45 @@ serve(async (req) => {
             )
         }
 
-        // 调用 OpenAI GPT-4o
-        const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+        // 调用 Gemini API
+        const geminiRes = await fetch(`${GEMINI_URL}?key=${GEMINI_API_KEY}`, {
             method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${OPENAI_API_KEY}`,
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                model: 'gpt-4o',
-                messages: [
-                    { role: 'system', content: SYSTEM_PROMPT },
-                    {
-                        role: 'user',
-                        content: [
-                            { type: 'text', text: '请识别这张优惠活动截图中的信息：' },
-                            {
-                                type: 'image_url',
-                                image_url: {
-                                    url: `data:${mimeType || 'image/jpeg'};base64,${image}`,
-                                    detail: 'high'
-                                }
+                contents: [{
+                    parts: [
+                        { text: EXTRACTION_PROMPT },
+                        {
+                            inline_data: {
+                                mime_type: mimeType || 'image/jpeg',
+                                data: image
                             }
-                        ]
-                    }
-                ],
-                max_tokens: 1000,
-                temperature: 0.1
+                        }
+                    ]
+                }],
+                generationConfig: {
+                    temperature: 0.1,
+                    maxOutputTokens: 1000,
+                    responseMimeType: 'application/json'
+                }
             })
         })
 
-        if (!openaiRes.ok) {
-            const errText = await openaiRes.text()
-            console.error('[parse-deal-image] OpenAI API 错误:', errText)
+        if (!geminiRes.ok) {
+            const errText = await geminiRes.text()
+            console.error('[parse-deal-image] Gemini API 错误:', errText)
             return new Response(
-                JSON.stringify({ error: 'AI 识别服务异常' }),
+                JSON.stringify({ error: 'AI 识别服务异常，请稍后重试' }),
                 { status: 502, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } }
             )
         }
 
-        const openaiData = await openaiRes.json()
-        const content = openaiData.choices?.[0]?.message?.content || ''
+        const geminiData = await geminiRes.json()
+        const content = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || ''
 
-        // 从返回内容中提取 JSON
+        // 解析 JSON
         let parsed
         try {
-            // 尝试直接解析
             parsed = JSON.parse(content)
         } catch {
             // 尝试从 markdown 代码块中提取
@@ -131,11 +129,15 @@ serve(async (req) => {
             if (jsonMatch) {
                 parsed = JSON.parse(jsonMatch[1].trim())
             } else {
-                throw new Error('AI 返回内容无法解析为 JSON')
+                console.error('[parse-deal-image] 无法解析返回内容:', content)
+                throw new Error('AI 返回内容无法解析')
             }
         }
 
-        // 补全缺失字段的默认值
+        // 补全缺失字段
+        const today = new Date().toISOString().split('T')[0]
+        const threeMonthsLater = new Date(Date.now() + 90 * 86400000).toISOString().split('T')[0]
+
         const result = {
             merchantName: parsed.merchantName || '',
             title: parsed.title || '',
@@ -146,8 +148,8 @@ serve(async (req) => {
             price: Number(parsed.price) || 0,
             originalPrice: Number(parsed.originalPrice) || 0,
             conditions: parsed.conditions || '',
-            validFrom: parsed.validFrom || new Date().toISOString().split('T')[0],
-            validTo: parsed.validTo || new Date(Date.now() + 90 * 86400000).toISOString().split('T')[0],
+            validFrom: parsed.validFrom || today,
+            validTo: parsed.validTo || threeMonthsLater,
             confidence: Number(parsed.confidence) || 0.5
         }
 
@@ -156,10 +158,11 @@ serve(async (req) => {
             { status: 200, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } }
         )
 
-    } catch (err) {
-        console.error('[parse-deal-image] 处理异常:', err)
+    } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : '服务异常'
+        console.error('[parse-deal-image] 处理异常:', message)
         return new Response(
-            JSON.stringify({ error: err.message || '服务异常' }),
+            JSON.stringify({ error: message }),
             { status: 500, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } }
         )
     }
