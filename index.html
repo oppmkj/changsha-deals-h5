@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8" />
+  <link rel="icon" type="image/svg+xml" href="/icons/icon-192.svg" />
+  <meta name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+
+  <!-- PWA -->
+  <link rel="manifest" href="/manifest.json" />
+  <meta name="theme-color" content="#FF4D00" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.svg" />
+
+  <!-- User specified fonts and icons for Tailwind design -->
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
+    rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap"
+    rel="stylesheet" />
+
+  <!-- 腾讯地图 JS API v2（异步加载，不阻塞渲染） -->
+  <!-- 
+    申请 Key：https://lbs.qq.com/console/key.html （免费，localhost 不限速）
+    如未配置 Key，地图将显示为水印模式（仍可使用所有 API）
+  -->
+  <script>
+    // 腾讯地图加载完成后的全局回调（Nearby 页面会注册此函数）
+    window.initTMap = window.initTMap || function () { };
+  </script>
+  <script src="https://map.qq.com/api/gljs?v=1.exp&key=OB4BZ-D4W3U-B7VVO-4PJWW-6TKDJ-WPB77&callback=initTMap" async
+    defer></script>
+
+  <meta name="description" content="长沙本地吃喝玩乐优惠聚合" />
+  <title>长沙省钱攻略 — 优惠比价决策平台</title>
+</head>
+
+<body class="bg-background-light dark:bg-background-dark font-display text-slate-900 dark:text-slate-100 min-h-screen">
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+
+  <!-- Service Worker 注册 -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js')
+          .then(reg => console.info('[SW] 注册成功', reg.scope))
+          .catch(err => console.warn('[SW] 注册失败', err))
+      })
+    }
+  </script>
+</body>
+
+</html>
